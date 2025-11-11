@@ -1,0 +1,26 @@
+# Environment
+.env
+.env.local
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Build
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+coverage.txt
+
+# OS
+.DS_Store
+Thumbs.db
