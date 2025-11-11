@@ -28,7 +28,7 @@ A unified Go interface for multiple Large Language Model (LLM) providers with st
 ## Installation
 
 ```bash
-go get github.com/YOUR_USERNAME/go-multi-llm
+go get github.com/ulgerang/go-multi-llm
 ```
 
 ## Quick Start
@@ -41,8 +41,8 @@ import (
     "fmt"
     "log"
 
-    "github.com/YOUR_USERNAME/go-multi-llm/llm"
-    "github.com/YOUR_USERNAME/go-multi-llm/providers/openai"
+    "github.com/ulgerang/go-multi-llm/llm"
+    "github.com/ulgerang/go-multi-llm/providers/openai"
 )
 
 func main() {
@@ -213,7 +213,7 @@ type Provider interface {
 The package uses structured logging with `slog`. You can configure the logger:
 
 ```go
-import "github.com/YOUR_USERNAME/go-multi-llm/logger"
+import "github.com/ulgerang/go-multi-llm/logger"
 
 // Set log level
 logger.SetLevel(slog.LevelDebug)
