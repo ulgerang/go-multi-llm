@@ -22,6 +22,7 @@ type GenerationOptions struct {
 	Tools              []*Tool
 	UseCache           bool
 	AllowSexualContent bool
+	Model              *string
 }
 
 // StreamChunk represents a piece of the streamed response.
@@ -113,6 +114,12 @@ func WithCache(useCache bool) GenerationOption {
 func WithAllowSexualContent(allow bool) GenerationOption {
 	return func(options *GenerationOptions) {
 		options.AllowSexualContent = allow
+	}
+}
+
+func WithModel(model string) GenerationOption {
+	return func(options *GenerationOptions) {
+		options.Model = ValuePtr(model)
 	}
 }
 

@@ -214,7 +214,7 @@ func (p *Provider) composeSystemPrompt(options *llm.GenerationOptions) string {
 	systemPrompt := options.System
 	if options.Language != "" {
 		if options.Language == "ko" || options.Language == "korean" {
-			systemPrompt = "해당 언어로 작성하라. " + systemPrompt
+			systemPrompt = "?대떦 ?몄뼱濡??묒꽦?섎씪. " + systemPrompt
 		} else {
 			systemPrompt = "Please write in " + options.Language + ". " + systemPrompt
 		}
@@ -226,7 +226,7 @@ func (p *Provider) composeSystemPrompt(options *llm.GenerationOptions) string {
 		}
 		if options.Language != "" {
 			if options.Language == "ko" || options.Language == "korean" {
-				systemPrompt = "해당 언어로 작성하라. " + sb.String()
+				systemPrompt = "?대떦 ?몄뼱濡??묒꽦?섎씪. " + sb.String()
 			} else {
 				systemPrompt = "Please write in " + options.Language + ". " + sb.String()
 			}

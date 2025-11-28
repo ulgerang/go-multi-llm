@@ -1,4 +1,4 @@
-package openai
+﻿package openai
 
 import (
 	"context"
@@ -56,6 +56,36 @@ func New(log logger.Logger, apiKey, modelName string) (*Provider, error) {
 	}, nil
 }
 
+// NewWithBaseURL creates a new Provider instance with a custom Base URL.
+func NewWithBaseURL(log logger.Logger, apiKey, modelName, baseURL string) (*Provider, error) {
+	resolvedAPIKey := apiKey
+	if resolvedAPIKey == "" {
+		resolvedAPIKey = os.Getenv("OPENAI_API_KEY")
+	}
+
+	if modelName == "" {
+		modelName = defaultOpenAIModel
+	}
+
+	var client sdk.Client
+	opts := []option.RequestOption{}
+	if resolvedAPIKey != "" {
+		opts = append(opts, option.WithAPIKey(resolvedAPIKey))
+	}
+	if baseURL != "" {
+		opts = append(opts, option.WithBaseURL(baseURL))
+	}
+
+	client = sdk.NewClient(opts...)
+
+	return &Provider{
+		client:    client,
+		apiKey:    resolvedAPIKey,
+		modelName: modelName,
+		logger:    log,
+	}, nil
+}
+
 // GetModelName returns the model name used by this provider.
 func (p *Provider) GetModelName() string {
 	return p.modelName
@@ -74,7 +104,7 @@ func (p *Provider) GenerateText(ctx context.Context, prompt string, opts ...llm.
 	systemPrompt := options.System
 	if options.Language != "" {
 		if options.Language == "ko" || options.Language == "korean" {
-			systemPrompt = "해당 언어로 작성하라. " + systemPrompt
+			systemPrompt = "Please write in Korean. " + systemPrompt
 		} else {
 			systemPrompt = "Please write in " + options.Language + ". " + systemPrompt
 		}
@@ -86,7 +116,7 @@ func (p *Provider) GenerateText(ctx context.Context, prompt string, opts ...llm.
 		}
 		if options.Language != "" {
 			if options.Language == "ko" || options.Language == "korean" {
-				systemPrompt = "해당 언어로 작성하라. " + sb.String()
+				systemPrompt = "Please write in Korean. " + sb.String()
 			} else {
 				systemPrompt = "Please write in " + options.Language + ". " + sb.String()
 			}
@@ -205,7 +235,7 @@ func (p *Provider) GenerateTextStream(ctx context.Context, prompt string, outCha
 	systemPrompt := options.System
 	if options.Language != "" {
 		if options.Language == "ko" || options.Language == "korean" {
-			systemPrompt = "해당 언어로 작성하라. " + systemPrompt
+			systemPrompt = "Please write in Korean. " + systemPrompt
 		} else {
 			systemPrompt = "Please write in " + options.Language + ". " + systemPrompt
 		}
@@ -217,7 +247,7 @@ func (p *Provider) GenerateTextStream(ctx context.Context, prompt string, outCha
 		}
 		if options.Language != "" {
 			if options.Language == "ko" || options.Language == "korean" {
-				systemPrompt = "해당 언어로 작성하라. " + sb.String()
+				systemPrompt = "Please write in Korean. " + sb.String()
 			} else {
 				systemPrompt = "Please write in " + options.Language + ". " + sb.String()
 			}
@@ -312,8 +342,8 @@ func processFinalUsage(lastUsage *sdk.CompletionUsage, log logger.Logger) (*llm.
 
 	log.Info("[OpenAI Stream] Processing final usage data.")
 	finalUsageInfo := &llm.UsageInfo{
-		InputTokens:  int(lastUsage.PromptTokens),
-		OutputTokens: int(lastUsage.CompletionTokens),
+		InputTokens:    int(lastUsage.PromptTokens),
+		OutputTokens:   int(lastUsage.CompletionTokens),
 		CacheHitTokens: 0,
 	}
 

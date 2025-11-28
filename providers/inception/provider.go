@@ -2,8 +2,9 @@ package inception
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"io"
+	"fmt"
 	"os"
 	"strings"
 
@@ -12,129 +13,129 @@ import (
 
 	"github.com/ulgerang/llm-module/llm"
 	"github.com/ulgerang/llm-module/logger"
+	"github.com/ulgerang/llm-module/utils"
 )
 
 const (
-	defaultModel               = "mercury"
-	baseURL                    = "https://api.inceptionlabs.ai/v1"
-	structuredOutputSchemaName = "structured_output"
+	defaultModel = "inception-v1" // Placeholder, user should verify
 )
 
 // Provider implements llm.Provider for Inception models.
 type Provider struct {
 	client    sdk.Client
-	apiKey    string
-	modelName string
 	logger    logger.Logger
+	modelName string
 }
 
 // New creates a new Inception provider.
 func New(log logger.Logger, apiKey, modelName string) (*Provider, error) {
-	resolvedKey := apiKey
-	if resolvedKey == "" {
-		resolvedKey = os.Getenv("INCEPTION_API_KEY")
-		if resolvedKey == "" {
-			log.Info("[Inception] API key not explicitly provided, relying on INCEPTION_API_KEY environment variable.")
+	if apiKey == "" {
+		apiKey = os.Getenv("INCEPTION_API_KEY")
+		if apiKey == "" {
+			return nil, errors.New("INCEPTION_API_KEY not provided")
 		}
 	}
 
 	if modelName == "" {
-		modelName = defaultModel
+		modelName = os.Getenv("INCEPTION_MODEL")
+		if modelName == "" {
+			modelName = defaultModel
+		}
 	}
 
-	client := sdk.NewClient(
-		option.WithAPIKey(resolvedKey),
-		option.WithBaseURL(baseURL),
-	)
+	baseURL := os.Getenv("INCEPTION_BASE_URL")
+	opts := []option.RequestOption{
+		option.WithAPIKey(apiKey),
+	}
+	if baseURL != "" {
+		opts = append(opts, option.WithBaseURL(baseURL))
+	}
 
-	return &Provider{client: client, apiKey: resolvedKey, modelName: modelName, logger: log}, nil
+	client := sdk.NewClient(opts...)
+
+	return &Provider{client: client, logger: log, modelName: modelName}, nil
 }
 
-// GetModelName returns the active model name.
+// GetModelName returns the active Inception model name.
 func (p *Provider) GetModelName() string {
 	return p.modelName
 }
 
-// GenerateText issues a non-streaming completion request.
+// GenerateText performs a non-streaming Inception request.
 func (p *Provider) GenerateText(ctx context.Context, prompt string, opts ...llm.GenerationOption) (string, *llm.UsageInfo, error) {
 	options := &llm.GenerationOptions{
 		Temperature: llm.ValuePtr(float32(0.7)),
-		MaxTokens:   llm.ValuePtr(int32(2048)),
+		MaxTokens:   llm.ValuePtr(int32(4096)),
 	}
 	for _, opt := range opts {
 		opt(options)
 	}
 
-	systemPrompt := composeSystemPrompt(options)
+	systemPrompt := buildSystemPrompt(options)
 
 	messages := []sdk.ChatCompletionMessageParamUnion{}
 	if systemPrompt != "" {
 		messages = append(messages, sdk.SystemMessage(systemPrompt))
 	}
 	messages = append(messages, sdk.UserMessage(prompt))
+	if options.Language != "" {
+		messages = append(messages, sdk.UserMessage(languageReminder(options.Language)))
+	}
 
-	params := sdk.ChatCompletionNewParams{Messages: messages, Model: p.modelName}
+	req := sdk.ChatCompletionNewParams{Model: p.modelName, Messages: messages}
 
 	if options.Temperature != nil {
-		params.Temperature = sdk.Float(float64(*options.Temperature))
+		req.Temperature = sdk.Float(float64(*options.Temperature))
 	}
 	if options.MaxTokens != nil {
-		params.MaxTokens = sdk.Int(int64(*options.MaxTokens))
+		req.MaxTokens = sdk.Int(int64(*options.MaxTokens))
 	}
 	if options.TopP != nil {
-		params.TopP = sdk.Float(float64(*options.TopP))
+		req.TopP = sdk.Float(float64(*options.TopP))
 	}
 
-	if len(options.Tools) > 0 {
-		if err := p.applyTools(&params, options.Tools); err != nil {
-			return "", nil, err
-		}
-	} else if options.ResponseSchema != nil {
-		p.applyStructuredOutput(&params, options.ResponseSchema)
-	}
-
-	resp, err := p.client.Chat.Completions.New(ctx, params)
+	resp, err := p.client.Chat.Completions.New(ctx, req)
 	if err != nil {
-		p.logger.Error("[Inception] API error", err)
+		p.logger.Error("[Inception] Failed to generate content", err)
 		return "", nil, err
 	}
 
-	if len(resp.Choices) == 0 {
-		p.logger.Warning("[Inception] No choices returned")
-		return "", nil, nil
+	if len(resp.Choices) == 0 || resp.Choices[0].Message.Content == "" {
+		p.logger.Warning("[Inception] No content generated")
+		return "", nil, errors.New("no content generated")
 	}
 
-	choice := resp.Choices[0]
+	generated := resp.Choices[0].Message.Content
+	if options.ResponseSchema != nil {
+		if extracted, extractErr := utils.ExtractJSONFromString(generated); extractErr == nil {
+			generated = extracted
+		} else {
+			p.logger.Warningf("[Inception] Failed to extract JSON: %v", extractErr)
+		}
+	}
+
 	usage := &llm.UsageInfo{
 		InputTokens:  int(resp.Usage.PromptTokens),
 		OutputTokens: int(resp.Usage.CompletionTokens),
 	}
 
-	if len(choice.Message.ToolCalls) > 0 {
-		p.logger.Infof("[Inception] Received %d tool call(s)", len(choice.Message.ToolCalls))
-		return choice.Message.ToolCalls[0].Function.Arguments, usage, nil
-	}
-
-	if resp.SystemFingerprint != "" {
-		p.logger.Info("[Inception] System Fingerprint: " + resp.SystemFingerprint)
-	}
-
-	return choice.Message.Content, usage, nil
+	p.logger.Info(fmt.Sprintf("Generated text (Inception): %s", generated))
+	return generated, usage, nil
 }
 
-// GenerateTextStream streams completion chunks.
+// GenerateTextStream streams responses from Inception.
 func (p *Provider) GenerateTextStream(ctx context.Context, prompt string, outChan chan<- llm.StreamChunk, opts ...llm.GenerationOption) (*llm.UsageInfo, error) {
 	defer close(outChan)
 
 	options := &llm.GenerationOptions{
 		Temperature: llm.ValuePtr(float32(0.7)),
-		MaxTokens:   llm.ValuePtr(int32(1024)),
+		MaxTokens:   llm.ValuePtr(int32(4096)),
 	}
 	for _, opt := range opts {
 		opt(options)
 	}
 
-	systemPrompt := composeSystemPrompt(options)
+	systemPrompt := buildSystemPrompt(options)
 
 	messages := []sdk.ChatCompletionMessageParamUnion{}
 	if systemPrompt != "" {
@@ -142,158 +143,103 @@ func (p *Provider) GenerateTextStream(ctx context.Context, prompt string, outCha
 	}
 	messages = append(messages, sdk.UserMessage(prompt))
 
-	params := sdk.ChatCompletionNewParams{Messages: messages, Model: p.modelName}
+	req := sdk.ChatCompletionNewParams{Model: p.modelName, Messages: messages}
 
 	if options.Temperature != nil {
-		params.Temperature = sdk.Float(float64(*options.Temperature))
+		req.Temperature = sdk.Float(float64(*options.Temperature))
 	}
 	if options.MaxTokens != nil {
-		params.MaxTokens = sdk.Int(int64(*options.MaxTokens))
+		req.MaxTokens = sdk.Int(int64(*options.MaxTokens))
 	}
 	if options.TopP != nil {
-		params.TopP = sdk.Float(float64(*options.TopP))
+		req.TopP = sdk.Float(float64(*options.TopP))
 	}
 
-	if len(options.Tools) > 0 {
-		p.logger.Warning("[Inception Stream] Tool calling is disabled for streaming; ignoring tools.")
-	} else if options.ResponseSchema != nil {
-		p.logger.Warning("[Inception Stream] Structured output is not supported in streaming mode; ignoring schema.")
-	}
-
-	stream := p.client.Chat.Completions.NewStreaming(ctx, params)
+	stream := p.client.Chat.Completions.NewStreaming(ctx, req)
 	defer stream.Close()
 
-	var lastUsage *sdk.CompletionUsage
-	var systemFingerprint string
+	var lastChunk sdk.ChatCompletionChunk
 
 	for stream.Next() {
-		resp := stream.Current()
+		chunk := stream.Current()
+		lastChunk = chunk
 
-		if len(resp.Choices) > 0 {
-			delta := resp.Choices[0].Delta.Content
+		if len(chunk.Choices) > 0 {
+			delta := chunk.Choices[0].Delta.Content
 			if delta != "" {
-				select {
-				case outChan <- llm.StreamChunk{Delta: delta}:
-				case <-ctx.Done():
-					p.logger.Info("[Inception Stream] Context cancelled during send")
-					usage, _ := processFinalUsage(lastUsage, p.logger)
-					return usage, ctx.Err()
-				}
+				outChan <- llm.StreamChunk{Delta: delta}
 			}
 		}
-
-		lastUsage = &resp.Usage
-		if resp.SystemFingerprint != "" {
-			systemFingerprint = resp.SystemFingerprint
-		}
 	}
 
-	if err := stream.Err(); err != nil && !errors.Is(err, io.EOF) {
-		p.logger.Error("[Inception Stream] Stream error", err)
-		usage, _ := processFinalUsage(lastUsage, p.logger)
-		return usage, err
+	if err := stream.Err(); err != nil {
+		p.logger.Error("[Inception] Stream error", err)
+		outChan <- llm.StreamChunk{Err: err}
+		return nil, err
 	}
 
-	usage, err := processFinalUsage(lastUsage, p.logger)
-	if err != nil {
-		p.logger.Errorf("[Inception Stream] Usage processing error: %v", err)
-	}
-	if systemFingerprint != "" {
-		p.logger.Info("[Inception Stream] System Fingerprint: " + systemFingerprint)
-	}
-
-	return usage, nil
+	return parseUsageFromChunk(lastChunk, p.logger), nil
 }
 
-// Close closes any persistent resources (none for now).
+// Close releases resources.
 func (p *Provider) Close() error {
 	p.logger.Info("[Inception] Provider closed.")
 	return nil
 }
 
-func (p *Provider) applyTools(params *sdk.ChatCompletionNewParams, tools []*llm.Tool) error {
-	params.Tools = make([]sdk.ChatCompletionToolParam, 0, len(tools))
-	for _, tool := range tools {
-		if tool.InputSchema == nil {
-			p.logger.Warningf("[Inception] Tool '%s' missing input schema, skipping", tool.Name)
-			continue
-		}
+func buildSystemPrompt(options *llm.GenerationOptions) string {
+	var builder strings.Builder
 
-		schemaMap, err := llm.ConvertSchemaToMap(tool.InputSchema)
-		if err != nil {
-			p.logger.Errorf("[Inception] Failed to convert schema for tool '%s': %v", tool.Name, err)
-			return err
-		}
-
-		params.Tools = append(params.Tools, sdk.ChatCompletionToolParam{
-			Function: sdk.FunctionDefinitionParam{
-				Name:        tool.Name,
-				Description: sdk.String(tool.Description),
-				Parameters:  schemaMap,
-			},
-		})
-	}
-
-	p.logger.Info("[Inception] Using tool calling mode")
-	return nil
-}
-
-func (p *Provider) applyStructuredOutput(params *sdk.ChatCompletionNewParams, schema *llm.SchemaProperty) {
-	schemaMap, err := llm.ConvertSchemaToMap(schema)
-	if err != nil {
-		p.logger.Error("[Inception] Failed to convert response schema", err)
-		return
-	}
-
-	schemaParam := sdk.ResponseFormatJSONSchemaJSONSchemaParam{
-		Name:        structuredOutputSchemaName,
-		Description: sdk.String("Structured output based on the requested schema"),
-		Schema:      schemaMap,
-		Strict:      sdk.Bool(true),
-	}
-	params.ResponseFormat = sdk.ChatCompletionNewParamsResponseFormatUnion{
-		OfJSONSchema: &sdk.ResponseFormatJSONSchemaParam{JSONSchema: schemaParam},
-	}
-
-	p.logger.Info("[Inception] Using structured output mode")
-}
-
-func composeSystemPrompt(options *llm.GenerationOptions) string {
-	systemPrompt := options.System
-	if options.Language != "" {
-		if options.Language == "ko" || options.Language == "korean" {
-			systemPrompt = "해당 언어로 작성하라. " + systemPrompt
-		} else {
-			systemPrompt = "Please write in " + options.Language + ". " + systemPrompt
-		}
-	}
 	if len(options.SystemBlocks) > 0 {
-		var sb strings.Builder
 		for _, block := range options.SystemBlocks {
-			sb.WriteString(block.Text)
-		}
-		if options.Language != "" {
-			if options.Language == "ko" || options.Language == "korean" {
-				systemPrompt = "해당 언어로 작성하라. " + sb.String()
-			} else {
-				systemPrompt = "Please write in " + options.Language + ". " + sb.String()
-			}
-		} else {
-			systemPrompt = sb.String()
+			builder.WriteString(block.Text)
+			builder.WriteString("\n\n")
 		}
 	}
-	return systemPrompt
+	if options.System != "" {
+		builder.WriteString(options.System)
+		builder.WriteString("\n\n")
+	}
+	if options.Language != "" && options.Language != "en" {
+		builder.WriteString(languageReminder(options.Language))
+		builder.WriteString("\n\n")
+	}
+	if options.ResponseSchema != nil {
+		schemaJSON, err := llm.ConvertToJSONSchema(options.ResponseSchema)
+		if err == nil {
+			builder.WriteString("Please provide your response strictly in the following JSON format, enclosed within ```json ... ```:\n```json\n")
+			builder.WriteString(schemaJSON)
+			builder.WriteString("\n```\n\n")
+		}
+	}
+
+	return strings.TrimSpace(builder.String())
 }
 
-func processFinalUsage(lastUsage *sdk.CompletionUsage, log logger.Logger) (*llm.UsageInfo, error) {
-	if lastUsage == nil {
-		log.Warning("[Inception Stream] No usage information received")
-		return nil, nil
+func languageReminder(code string) string {
+	return fmt.Sprintf("[Important!!]Please respond in **%s**.", utils.GetLangName(code))
+}
+
+func parseUsageFromChunk(chunk sdk.ChatCompletionChunk, log logger.Logger) *llm.UsageInfo {
+	if chunk.RawJSON() == "" {
+		return nil
 	}
 
-	usage := &llm.UsageInfo{
-		InputTokens:  int(lastUsage.PromptTokens),
-		OutputTokens: int(lastUsage.CompletionTokens),
+	type usageEnvelope struct {
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
 	}
-	return usage, nil
+
+	var payload usageEnvelope
+	if err := json.Unmarshal([]byte(chunk.RawJSON()), &payload); err != nil {
+		log.Error("[Inception] Failed to parse usage data", err)
+		return nil
+	}
+
+	return &llm.UsageInfo{
+		InputTokens:  payload.Usage.PromptTokens,
+		OutputTokens: payload.Usage.CompletionTokens,
+	}
 }
