@@ -17,7 +17,8 @@ import (
 )
 
 const (
-	defaultModel = "inception-v1" // Placeholder, user should verify
+	defaultModel   = "inception-v1" // Placeholder, user should verify
+	defaultBaseURL = "https://api.inceptionlabs.ai/v1"
 )
 
 // Provider implements llm.Provider for Inception models.
@@ -27,8 +28,12 @@ type Provider struct {
 	modelName string
 }
 
-// New creates a new Inception provider.
-func New(log logger.Logger, apiKey, modelName string) (*Provider, error) {
+// NewWithBaseURL creates a new Inception provider with a custom base URL.
+func NewWithBaseURL(log logger.Logger, apiKey, modelName, baseURL string) (*Provider, error) {
+	return newProvider(log, apiKey, modelName, baseURL)
+}
+
+func newProvider(log logger.Logger, apiKey, modelName, baseURL string) (*Provider, error) {
 	if apiKey == "" {
 		apiKey = os.Getenv("INCEPTION_API_KEY")
 		if apiKey == "" {
@@ -43,7 +48,13 @@ func New(log logger.Logger, apiKey, modelName string) (*Provider, error) {
 		}
 	}
 
-	baseURL := os.Getenv("INCEPTION_BASE_URL")
+	if baseURL == "" {
+		baseURL = os.Getenv("INCEPTION_BASE_URL")
+		if baseURL == "" {
+			baseURL = defaultBaseURL
+		}
+	}
+
 	opts := []option.RequestOption{
 		option.WithAPIKey(apiKey),
 	}
@@ -54,6 +65,11 @@ func New(log logger.Logger, apiKey, modelName string) (*Provider, error) {
 	client := sdk.NewClient(opts...)
 
 	return &Provider{client: client, logger: log, modelName: modelName}, nil
+}
+
+// New creates a new Inception provider.
+func New(log logger.Logger, apiKey, modelName string) (*Provider, error) {
+	return newProvider(log, apiKey, modelName, "")
 }
 
 // GetModelName returns the active Inception model name.
@@ -70,6 +86,8 @@ func (p *Provider) GenerateText(ctx context.Context, prompt string, opts ...llm.
 	for _, opt := range opts {
 		opt(options)
 	}
+
+	p.logger.Info(fmt.Sprintf("[Inception] Sending request to model: %s", p.modelName))
 
 	systemPrompt := buildSystemPrompt(options)
 
@@ -119,7 +137,7 @@ func (p *Provider) GenerateText(ctx context.Context, prompt string, opts ...llm.
 		OutputTokens: int(resp.Usage.CompletionTokens),
 	}
 
-	p.logger.Info(fmt.Sprintf("Generated text (Inception): %s", generated))
+	p.logger.Info(fmt.Sprintf("Generated text (Inception/%s): %s", p.modelName, generated))
 	return generated, usage, nil
 }
 
