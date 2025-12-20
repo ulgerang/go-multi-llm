@@ -225,8 +225,8 @@ func parseUsageFromChunk(chunk sdk.ChatCompletionChunk, log logger.Logger) *llm.
 
 	type deepSeekUsage struct {
 		Usage struct {
-			PromptTokens        int `json:"prompt_tokens"`
-			CompletionTokens    int `json:"completion_tokens"`
+			PromptTokens          int `json:"prompt_tokens"`
+			CompletionTokens      int `json:"completion_tokens"`
 			PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens"`
 			PromptCacheMissTokens int `json:"prompt_cache_miss_tokens"`
 		} `json:"usage"`

@@ -33,13 +33,19 @@ type Provider struct {
 
 // ChatRequest represents the Z.AI chat completion request.
 type ChatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Stream      bool          `json:"stream,omitempty"`
-	Temperature *float64      `json:"temperature,omitempty"`
-	TopP        *float64      `json:"top_p,omitempty"`
-	MaxTokens   *int64        `json:"max_tokens,omitempty"`
-	DoSample    *bool         `json:"do_sample,omitempty"`
+	Model          string          `json:"model"`
+	Messages       []ChatMessage   `json:"messages"`
+	Stream         bool            `json:"stream,omitempty"`
+	Temperature    *float64        `json:"temperature,omitempty"`
+	TopP           *float64        `json:"top_p,omitempty"`
+	MaxTokens      *int64          `json:"max_tokens,omitempty"`
+	DoSample       *bool           `json:"do_sample,omitempty"`
+	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+}
+
+// ResponseFormat specifies the format of the response.
+type ResponseFormat struct {
+	Type string `json:"type"`
 }
 
 // ChatMessage represents a message in the chat.
@@ -151,7 +157,7 @@ func (p *Provider) GenerateText(ctx context.Context, prompt string, opts ...llm.
 		opt(options)
 	}
 
-	p.logger.Info(fmt.Sprintf("[ZAI] Sending request to model: %s", p.modelName))
+	p.logger.Debug(fmt.Sprintf("[ZAI] Sending request to model: %s", p.modelName))
 
 	systemPrompt := p.composeSystemPrompt(options)
 
@@ -165,6 +171,10 @@ func (p *Provider) GenerateText(ctx context.Context, prompt string, opts ...llm.
 		Model:    p.modelName,
 		Messages: messages,
 		// Stream:   false,  // Removed for ZAI API compatibility
+	}
+
+	if options.ResponseSchema != nil || strings.Contains(strings.ToLower(options.ResponseFormat), "json") {
+		req.ResponseFormat = &ResponseFormat{Type: "json_object"}
 	}
 
 	// Temporarily disable temperature and max_tokens for ZAI API compatibility
@@ -208,9 +218,21 @@ func (p *Provider) GenerateText(ctx context.Context, prompt string, opts ...llm.
 
 	if resp.StatusCode != http.StatusOK {
 		var errResp ErrorResponse
-		if json.Unmarshal(respBody, &errResp) == nil {
+		if json.Unmarshal(respBody, &errResp) == nil && (errResp.Code != "" || errResp.Message != "") {
 			return "", nil, fmt.Errorf("Z.AI API error (code %s): %s", errResp.Code, errResp.Message)
 		}
+
+		// Check for nested error object (standard OpenAI format)
+		var wrappedResp struct {
+			Error struct {
+				Code    interface{} `json:"code"`
+				Message string      `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(respBody, &wrappedResp) == nil && wrappedResp.Error.Message != "" {
+			return "", nil, fmt.Errorf("Z.AI API error (code %v): %s", wrappedResp.Error.Code, wrappedResp.Error.Message)
+		}
+
 		return "", nil, fmt.Errorf("Z.AI API error: %s", string(respBody))
 	}
 
@@ -238,7 +260,7 @@ func (p *Provider) GenerateText(ctx context.Context, prompt string, opts ...llm.
 		OutputTokens: chatResp.Usage.CompletionTokens,
 	}
 
-	p.logger.Info(fmt.Sprintf("Generated text (ZAI/%s): %s", p.modelName, generated))
+	p.logger.Debug(fmt.Sprintf("Generated text (ZAI/%s): %s", p.modelName, generated))
 	return generated, usage, nil
 }
 
@@ -267,6 +289,10 @@ func (p *Provider) GenerateTextStream(ctx context.Context, prompt string, outCha
 		Model:    p.modelName,
 		Messages: messages,
 		Stream:   true, // Enable streaming for ZAI API
+	}
+
+	if options.ResponseSchema != nil || strings.Contains(strings.ToLower(options.ResponseFormat), "json") {
+		req.ResponseFormat = &ResponseFormat{Type: "json_object"}
 	}
 
 	// Temporarily disable temperature and max_tokens for ZAI API compatibility
@@ -307,11 +333,24 @@ func (p *Provider) GenerateTextStream(ctx context.Context, prompt string, outCha
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
 		var errResp ErrorResponse
-		if json.Unmarshal(respBody, &errResp) == nil {
+		if json.Unmarshal(respBody, &errResp) == nil && (errResp.Code != "" || errResp.Message != "") {
 			err := fmt.Errorf("Z.AI API error (code %s): %s", errResp.Code, errResp.Message)
 			outChan <- llm.StreamChunk{Err: err}
 			return nil, err
 		}
+		// Check for nested error object
+		var wrappedResp struct {
+			Error struct {
+				Code    interface{} `json:"code"`
+				Message string      `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(respBody, &wrappedResp) == nil && wrappedResp.Error.Message != "" {
+			err := fmt.Errorf("Z.AI API error (code %v): %s", wrappedResp.Error.Code, wrappedResp.Error.Message)
+			outChan <- llm.StreamChunk{Err: err}
+			return nil, err
+		}
+
 		err := fmt.Errorf("Z.AI API error: %s", string(respBody))
 		outChan <- llm.StreamChunk{Err: err}
 		return nil, err

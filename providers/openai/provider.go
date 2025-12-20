@@ -7,6 +7,9 @@ import (
 	"os"
 	"strings"
 
+	"net/http"
+	"time"
+
 	sdk "github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 
@@ -28,7 +31,7 @@ type Provider struct {
 }
 
 // New creates a new Provider instance using the official Go client.
-func New(log logger.Logger, apiKey, modelName string) (*Provider, error) {
+func New(log logger.Logger, apiKey, modelName string, timeout time.Duration) (*Provider, error) {
 	resolvedAPIKey := apiKey
 	if resolvedAPIKey == "" {
 		resolvedAPIKey = os.Getenv("OPENAI_API_KEY")
@@ -42,11 +45,17 @@ func New(log logger.Logger, apiKey, modelName string) (*Provider, error) {
 	}
 
 	var client sdk.Client
+	opts := []option.RequestOption{}
 	if resolvedAPIKey != "" {
-		client = sdk.NewClient(option.WithAPIKey(resolvedAPIKey))
-	} else {
-		client = sdk.NewClient()
+		opts = append(opts, option.WithAPIKey(resolvedAPIKey))
 	}
+
+	if timeout > 0 {
+		httpClient := &http.Client{Timeout: timeout}
+		opts = append(opts, option.WithHTTPClient(httpClient))
+	}
+
+	client = sdk.NewClient(opts...)
 
 	return &Provider{
 		client:    client,
@@ -57,7 +66,7 @@ func New(log logger.Logger, apiKey, modelName string) (*Provider, error) {
 }
 
 // NewWithBaseURL creates a new Provider instance with a custom Base URL.
-func NewWithBaseURL(log logger.Logger, apiKey, modelName, baseURL string) (*Provider, error) {
+func NewWithBaseURL(log logger.Logger, apiKey, modelName, baseURL string, timeout time.Duration) (*Provider, error) {
 	resolvedAPIKey := apiKey
 	if resolvedAPIKey == "" {
 		resolvedAPIKey = os.Getenv("OPENAI_API_KEY")
@@ -74,6 +83,10 @@ func NewWithBaseURL(log logger.Logger, apiKey, modelName, baseURL string) (*Prov
 	}
 	if baseURL != "" {
 		opts = append(opts, option.WithBaseURL(baseURL))
+	}
+	if timeout > 0 {
+		httpClient := &http.Client{Timeout: timeout}
+		opts = append(opts, option.WithHTTPClient(httpClient))
 	}
 
 	client = sdk.NewClient(opts...)
