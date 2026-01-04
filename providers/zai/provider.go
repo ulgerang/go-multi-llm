@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	defaultModel   = "glm-4.6"
+	defaultModel   = "glm-4.7"
 	defaultBaseURL = "https://api.z.ai/api/coding/paas/v4"
 )
 
@@ -41,6 +41,12 @@ type ChatRequest struct {
 	MaxTokens      *int64          `json:"max_tokens,omitempty"`
 	DoSample       *bool           `json:"do_sample,omitempty"`
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	Thinking       *ThinkingConfig `json:"thinking,omitempty"`
+}
+
+// ThinkingConfig specifies reasoning capabilities.
+type ThinkingConfig struct {
+	Type string `json:"type"`
 }
 
 // ResponseFormat specifies the format of the response.
@@ -50,8 +56,9 @@ type ResponseFormat struct {
 
 // ChatMessage represents a message in the chat.
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role             string `json:"role"`
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 // ChatResponse represents the Z.AI chat completion response.
@@ -177,18 +184,22 @@ func (p *Provider) GenerateText(ctx context.Context, prompt string, opts ...llm.
 		req.ResponseFormat = &ResponseFormat{Type: "json_object"}
 	}
 
-	// Temporarily disable temperature and max_tokens for ZAI API compatibility
-	// if options.Temperature != nil {
-	// 	temp := float64(*options.Temperature)
-	// 	req.Temperature = &temp
-	// }
-	// if options.MaxTokens != nil {
-	// 	maxTok := int64(*options.MaxTokens)
-	// 	req.MaxTokens = &maxTok
-	// }
+	if options.Temperature != nil {
+		temp := float64(*options.Temperature)
+		req.Temperature = &temp
+	}
+	if options.MaxTokens != nil {
+		maxTok := int64(*options.MaxTokens)
+		req.MaxTokens = &maxTok
+	}
 	if options.TopP != nil {
 		topP := float64(*options.TopP)
 		req.TopP = &topP
+	}
+
+	// Enable thinking for GLM-4.7 models by default or if requested
+	if strings.Contains(p.modelName, "glm-4.7") {
+		req.Thinking = &ThinkingConfig{Type: "enabled"}
 	}
 
 	body, err := json.Marshal(req)
@@ -241,12 +252,20 @@ func (p *Provider) GenerateText(ctx context.Context, prompt string, opts ...llm.
 		return "", nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	if len(chatResp.Choices) == 0 || chatResp.Choices[0].Message.Content == "" {
+	if len(chatResp.Choices) == 0 {
 		p.logger.Warning("[ZAI] No content generated")
 		return "", nil, errors.New("no content generated")
 	}
 
-	generated := chatResp.Choices[0].Message.Content
+	message := chatResp.Choices[0].Message
+	generated := message.Content
+	if generated == "" && message.ReasoningContent != "" {
+		generated = message.ReasoningContent
+	}
+	if generated == "" {
+		p.logger.Warning("[ZAI] No content generated")
+		return "", nil, errors.New("no content generated")
+	}
 	if options.ResponseSchema != nil {
 		if extracted, extractErr := utils.ExtractJSONFromString(generated); extractErr == nil {
 			generated = extracted
@@ -295,18 +314,22 @@ func (p *Provider) GenerateTextStream(ctx context.Context, prompt string, outCha
 		req.ResponseFormat = &ResponseFormat{Type: "json_object"}
 	}
 
-	// Temporarily disable temperature and max_tokens for ZAI API compatibility
-	// if options.Temperature != nil {
-	// 	temp := float64(*options.Temperature)
-	// 	req.Temperature = &temp
-	// }
-	// if options.MaxTokens != nil {
-	// 	maxTok := int64(*options.MaxTokens)
-	// 	req.MaxTokens = &maxTok
-	// }
+	if options.Temperature != nil {
+		temp := float64(*options.Temperature)
+		req.Temperature = &temp
+	}
+	if options.MaxTokens != nil {
+		maxTok := int64(*options.MaxTokens)
+		req.MaxTokens = &maxTok
+	}
 	if options.TopP != nil {
 		topP := float64(*options.TopP)
 		req.TopP = &topP
+	}
+
+	// Enable thinking for GLM-4.7 models by default or if requested
+	if strings.Contains(p.modelName, "glm-4.7") {
+		req.Thinking = &ThinkingConfig{Type: "enabled"}
 	}
 
 	body, err := json.Marshal(req)
