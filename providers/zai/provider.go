@@ -4,13 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/ulgerang/llm-module/llm"
 	"github.com/ulgerang/llm-module/logger"
@@ -143,8 +146,31 @@ func newProvider(log logger.Logger, apiKey, modelName, baseURL string) (*Provide
 		baseURL = defaultBaseURL
 	}
 
+	// Create HTTP client with generous timeouts for LLM API calls
+	// These APIs can be slow, especially for complex generation tasks
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second, // Connection timeout
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   30 * time.Second,  // TLS handshake timeout (was 10s default)
+		ResponseHeaderTimeout: 300 * time.Second, // Wait for response headers (5 min)
+		ExpectContinueTimeout: 1 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+
+	httpClient := &http.Client{
+		Transport: transport,
+		Timeout:   600 * time.Second, // Overall request timeout (10 min for long generation)
+	}
+
 	return &Provider{
-		httpClient: &http.Client{},
+		httpClient: httpClient,
 		apiKey:     apiKey,
 		baseURL:    baseURL,
 		logger:     log,
@@ -197,9 +223,17 @@ func (p *Provider) GenerateText(ctx context.Context, prompt string, opts ...llm.
 		req.TopP = &topP
 	}
 
-	// Enable thinking for GLM-4.7 models by default or if requested
+	// Enable thinking for GLM-4.7 models by default
+	// Thinking mode uses reasoning tokens WITHIN max_tokens budget, so we must ensure
+	// sufficient tokens for BOTH reasoning (500-2000+) AND actual content output.
+	// BUG FIX: Increased from 8192 to 16384 to prevent reasoning consuming entire budget.
 	if strings.Contains(p.modelName, "glm-4.7") {
 		req.Thinking = &ThinkingConfig{Type: "enabled"}
+		// Ensure minimum tokens for thinking mode - reasoning consumes part of the budget
+		minTokens := int64(16384)
+		if req.MaxTokens == nil || *req.MaxTokens < minTokens {
+			req.MaxTokens = &minTokens
+		}
 	}
 
 	body, err := json.Marshal(req)
@@ -259,8 +293,12 @@ func (p *Provider) GenerateText(ctx context.Context, prompt string, opts ...llm.
 
 	message := chatResp.Choices[0].Message
 	generated := message.Content
+	// BUG FIX: Do NOT fall back to reasoning_content when content is empty.
+	// This was causing LLM "thinking" to be returned as actual output.
+	// If content is empty but reasoning exists, the token budget was likely exhausted.
 	if generated == "" && message.ReasoningContent != "" {
-		generated = message.ReasoningContent
+		p.logger.Warning("[ZAI] Content is empty but reasoning_content exists - token budget may be insufficient")
+		return "", nil, errors.New("no content generated: reasoning consumed entire token budget, increase max_tokens")
 	}
 	if generated == "" {
 		p.logger.Warning("[ZAI] No content generated")
@@ -327,9 +365,17 @@ func (p *Provider) GenerateTextStream(ctx context.Context, prompt string, outCha
 		req.TopP = &topP
 	}
 
-	// Enable thinking for GLM-4.7 models by default or if requested
+	// Enable thinking for GLM-4.7 models by default
+	// Thinking mode uses reasoning tokens WITHIN max_tokens budget, so we must ensure
+	// sufficient tokens for BOTH reasoning (500-2000+) AND actual content output.
+	// BUG FIX: Increased from 8192 to 16384 to prevent reasoning consuming entire budget.
 	if strings.Contains(p.modelName, "glm-4.7") {
 		req.Thinking = &ThinkingConfig{Type: "enabled"}
+		// Ensure minimum tokens for thinking mode - reasoning consumes part of the budget
+		minTokens := int64(16384)
+		if req.MaxTokens == nil || *req.MaxTokens < minTokens {
+			req.MaxTokens = &minTokens
+		}
 	}
 
 	body, err := json.Marshal(req)
@@ -381,6 +427,10 @@ func (p *Provider) GenerateTextStream(ctx context.Context, prompt string, outCha
 
 	var usage *llm.UsageInfo
 	scanner := bufio.NewScanner(resp.Body)
+	// Increase buffer size to handle large responses (default 64K -> 10MB)
+	const maxTokenSize = 10 * 1024 * 1024 // 10MB
+	buf := make([]byte, maxTokenSize)
+	scanner.Buffer(buf, maxTokenSize)
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -408,12 +458,11 @@ func (p *Provider) GenerateTextStream(ctx context.Context, prompt string, outCha
 
 		if len(chunk.Choices) > 0 {
 			delta := chunk.Choices[0].Delta
-			// ZAI's GLM model sends reasoning_content first, then content
-			// We output both to show the full response
+			// BUG FIX: Only output actual content, NOT reasoning_content.
+			// ZAI's GLM model sends reasoning_content first, then content.
+			// Previously we were outputting both, which leaked LLM "thinking" to output.
 			content := delta.Content
-			if content == "" {
-				content = delta.ReasoningContent
-			}
+			// Skip reasoning_content chunks - they should not appear in output
 			if content != "" {
 				select {
 				case outChan <- llm.StreamChunk{Delta: content}:
@@ -470,18 +519,32 @@ func (p *Provider) composeSystemPrompt(options *llm.GenerationOptions) string {
 	}
 
 	if options.ResponseSchema != nil {
+		p.logger.Debugf("[ZAI] ResponseSchema received: %+v", options.ResponseSchema)
 		schemaJSON, err := llm.ConvertToJSONSchema(options.ResponseSchema)
 		if err != nil {
 			p.logger.Warningf("[ZAI] Failed to convert response schema: %v", err)
 		} else {
-			builder.WriteString("Please provide your response strictly in the following JSON format, enclosed within ```json ... ```:\n```json\n")
+			p.logger.Infof("[ZAI] ResponseSchema applied successfully, schema length: %d chars", len(schemaJSON))
+			builder.WriteString("Please provide your response strictly in the following JSON format:\n")
 			builder.WriteString(schemaJSON)
-			builder.WriteString("\n```\n\n")
+			builder.WriteString("\n\n")
 		}
 	}
 
 	if options.ResponseFormat != "" {
 		builder.WriteString(fmt.Sprintf("Response format: %s\n\n", options.ResponseFormat))
+
+		// BUG-004 fix: When JSON format is requested but no schema provided,
+		// add strict instructions to prevent LLM from adding explanatory text
+		if strings.Contains(strings.ToLower(options.ResponseFormat), "json") && options.ResponseSchema == nil {
+			builder.WriteString("\n!!! CRITICAL - JSON OUTPUT RULES !!!\n")
+			builder.WriteString("You MUST output ONLY valid JSON. Follow these rules strictly:\n")
+			builder.WriteString("1. Start your response with the '{' character\n")
+			builder.WriteString("2. End your response with the '}' character\n")
+			builder.WriteString("3. Do NOT include any text before or after the JSON\n")
+			builder.WriteString("4. Do NOT use markdown code blocks\n")
+			builder.WriteString("5. Do NOT add explanations, comments, or descriptions\n\n")
+		}
 	}
 
 	return strings.TrimSpace(builder.String())
